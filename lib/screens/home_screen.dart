@@ -144,37 +144,13 @@ class _AdminHomeScreenState extends State<AdminHomeScreen>
           (_pLevel[b['priority']] ?? 0).compareTo(_pLevel[a['priority']] ?? 0));
 
       final escalatedIds = {for (final c in active) c['id']: c['priority']};
-      final complaintIds =
-          all.map((c) => c['id']).whereType<Object>().toList();
-      Map<dynamic, List<Map<String, dynamic>>> commentsMap = {};
-      if (complaintIds.isNotEmpty) {
-        try {
-          final rawComments = await _db
-              .from('additional_comments')
-              .select()
-              .inFilter('complaint_id', complaintIds)
-              .order('created_at', ascending: false);
-          for (final row in rawComments as List) {
-            final cid = row['complaint_id'];
-            commentsMap.putIfAbsent(cid, () => []).add(
-                Map<String, dynamic>.from(row as Map));
-          }
-        } catch (e) {
-          debugPrint('additional_comments fetch error: $e');
-        }
-      }
 
       final allUpdated = all.map((c) {
         final updated = escalatedIds.containsKey(c['id'])
             ? (Map<String, dynamic>.from(c)..['priority'] = escalatedIds[c['id']])
             : Map<String, dynamic>.from(c);
-        updated['_comments'] = commentsMap[c['id']] ?? [];
         return updated;
       }).toList();
-
-      for (final c in deduped) {
-        c['_comments'] = commentsMap[c['id']] ?? [];
-      }
 
       final dynamic rawWorkers = await _db
           .from('workers')
@@ -590,12 +566,6 @@ class _AdminHomeScreenState extends State<AdminHomeScreen>
           'priority':           selectedPriority,
         }).eq('id', complaint['id'] as Object);
 
-        await _db.from('additional_comments').insert({
-          'complaint_id':          complaint['id'],
-          'admin_comment':         '',
-          'priority_changed_to':   selectedPriority,
-          'ai_suggested_priority': aiSuggestedPriority,
-        });
         _loadData();
       } catch (e) {
         if (mounted) _snack('Assign failed: $e', _kRed);
@@ -1847,68 +1817,6 @@ class _AdminHomeScreenState extends State<AdminHomeScreen>
                       '${createdAt.minute.toString().padLeft(2, '0')}',
                     ),
                 ]),
-                if ((c['_comments'] as List? ?? []).isNotEmpty) ...[
-                  const SizedBox(height: 10),
-                  Container(
-                    padding: const EdgeInsets.all(10),
-                    decoration: BoxDecoration(
-                      color: _kBlue.withOpacity(0.04),
-                      borderRadius: BorderRadius.circular(10),
-                      border: Border.all(color: _kBlue.withOpacity(0.15)),
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(children: [
-                          const Icon(Icons.admin_panel_settings_rounded,
-                              size: 13, color: _kBlue),
-                          const SizedBox(width: 6),
-                          Text('Admin Comments',
-                              style: GoogleFonts.poppins(
-                                  color: _kBlue,
-                                  fontSize: 11,
-                                  fontWeight: FontWeight.w600)),
-                        ]),
-                        const SizedBox(height: 6),
-                        ...((c['_comments'] as List).cast<Map<String, dynamic>>().map((cm) {
-                          final commentText = cm['admin_comment'] as String? ?? '';
-                          final priorityChanged = cm['priority_changed_to'] as String?;
-                          final aiSuggested = cm['ai_suggested_priority'] as String?;
-                          final createdAt = cm['created_at'] != null
-                              ? DateTime.tryParse(cm['created_at'].toString())?.toLocal()
-                              : null;
-                          return Padding(
-                            padding: const EdgeInsets.only(top: 4),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                if (commentText.isNotEmpty)
-                                  Text('• $commentText',
-                                      style: GoogleFonts.poppins(
-                                          color: _kTextDark,
-                                          fontSize: 12,
-                                          height: 1.4)),
-                                Wrap(spacing: 10, children: [
-                                  if (priorityChanged != null)
-                                    _meta(Icons.flag_rounded,
-                                        'Priority → ${priorityChanged.toUpperCase()}',
-                                        color: _pColor(priorityChanged)),
-                                  if (aiSuggested != null)
-                                    _meta(Icons.auto_awesome_rounded,
-                                        'AI: ${aiSuggested.toUpperCase()}',
-                                        color: _kBlue),
-                                  if (createdAt != null)
-                                    _meta(Icons.access_time_rounded,
-                                        '${createdAt.day}/${createdAt.month}/${createdAt.year}'),
-                                ]),
-                              ],
-                            ),
-                          );
-                        })),
-                      ],
-                    ),
-                  ),
-                ],
                 if (status == 'closed' && c['rating'] != null) ...[
                   const SizedBox(height: 10),
                   Row(
