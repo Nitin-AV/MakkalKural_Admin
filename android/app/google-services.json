@@ -1,0 +1,48 @@
+{
+  "project_info": {
+    "project_number": "464226347743",
+    "project_id": "smart-civic-connect-106ed",
+    "storage_bucket": "smart-civic-connect-106ed.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:464226347743:android:2a260b2df485ab8c40976a",
+        "android_client_info": {
+          "package_name": "com.example.smart_civic_admin"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCPFv8v1srDEPA8VQpl8YncIeCgg9daPE4"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:464226347743:android:bea1e92d7941e94740976a",
+        "android_client_info": {
+          "package_name": "com.example.smart_civic_connect"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCPFv8v1srDEPA8VQpl8YncIeCgg9daPE4"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
