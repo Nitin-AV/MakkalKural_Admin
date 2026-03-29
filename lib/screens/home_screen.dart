@@ -281,7 +281,6 @@ class _AdminHomeScreenState extends State<AdminHomeScreen>
 
   Future<void> _assignComplaint(Map<String, dynamic> complaint) async {
     final wardId = _adminData?['ward_id'];
-    final commentCtrl = TextEditingController();
 
     // Mutable state shared with dialog via closure
     Map<String, dynamic>? selectedWorker;
@@ -321,7 +320,7 @@ class _AdminHomeScreenState extends State<AdminHomeScreen>
                   'latitude': complaint['latitude'],
                   'longitude': complaint['longitude'],
                   'issue_name': complaint['issue_name'],
-                  'adminContext': commentCtrl.text.trim(),
+                  'adminContext': '',
                 }),
               );
               if (resp.statusCode == 200) {
@@ -541,42 +540,6 @@ class _AdminHomeScreenState extends State<AdminHomeScreen>
                       ]),
                     ],
 
-                    const SizedBox(height: 16),
-                    const Divider(height: 1),
-                    const SizedBox(height: 16),
-
-                    Text('Additional Comment (optional)',
-                        style: GoogleFonts.poppins(
-                            color: _kTextMid,
-                            fontSize: 11,
-                            fontWeight: FontWeight.w600)),
-                    const SizedBox(height: 8),
-                    TextField(
-                      controller: commentCtrl,
-                      maxLines: 3,
-                      style: GoogleFonts.poppins(
-                          color: _kTextDark, fontSize: 13),
-                      decoration: InputDecoration(
-                        hintText:
-                            'e.g. near hospital, requires urgent attention…',
-                        hintStyle: GoogleFonts.poppins(
-                            color: _kTextMid, fontSize: 12),
-                        filled: true,
-                        fillColor: _kBg,
-                        contentPadding: const EdgeInsets.all(12),
-                        border: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(12),
-                            borderSide: BorderSide(color: _kDivider)),
-                        enabledBorder: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(12),
-                            borderSide: BorderSide(color: _kDivider)),
-                        focusedBorder: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(12),
-                            borderSide: const BorderSide(
-                                color: _kBlue, width: 1.5)),
-                      ),
-                    ),
-
                     const SizedBox(height: 20),
                     Row(
                       mainAxisAlignment: MainAxisAlignment.end,
@@ -614,7 +577,6 @@ class _AdminHomeScreenState extends State<AdminHomeScreen>
                 '${selectedWorker!['name']} already has ${active.length} active jobs (max $_kMaxWorkerJobs).',
                 _kOrange);
           }
-          commentCtrl.dispose();
           return;
         }
         final dueDate = DateTime.now().add(const Duration(days: 5));
@@ -628,10 +590,9 @@ class _AdminHomeScreenState extends State<AdminHomeScreen>
           'priority':           selectedPriority,
         }).eq('id', complaint['id'] as Object);
 
-        final comment = commentCtrl.text.trim();
         await _db.from('additional_comments').insert({
           'complaint_id':          complaint['id'],
-          'admin_comment':         comment,
+          'admin_comment':         '',
           'priority_changed_to':   selectedPriority,
           'ai_suggested_priority': aiSuggestedPriority,
         });
@@ -640,7 +601,6 @@ class _AdminHomeScreenState extends State<AdminHomeScreen>
         if (mounted) _snack('Assign failed: $e', _kRed);
       }
     }
-    commentCtrl.dispose();
   }
 
   Future<void> _closeComplaint(Map<String, dynamic> c) async {
