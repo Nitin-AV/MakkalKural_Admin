@@ -1,16 +1,18 @@
+import 'dart:convert';
 import 'dart:math';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../bloc/login/login_cubit.dart';
 import 'login_screen.dart';
 
-// ─── theme ───────────────────────────────────────────────────────────────────
+
 const _kBg        = Color(0xfff0f4f8);
 const _kBlue      = Color(0xff1565c0);
 const _kBlueLight = Color(0xff42a5f5);
@@ -23,8 +25,8 @@ const _kDivider   = Color(0xffe8edf3);
 
 const int _kEscalationThreshold = 20;
 const int _kMaxWorkerJobs       = 10;
+const int _kUnassignedDays      = 3;   
 
-// ─── icon helper ─────────────────────────────────────────────────────────────
 IconData _issueIcon(String? name) {
   final n = (name ?? '').toLowerCase();
   if (n.contains('road') || n.contains('pothole')) return Icons.route_rounded;
@@ -43,7 +45,6 @@ IconData _issueIcon(String? name) {
   return Icons.report_problem_rounded;
 }
 
-// ─── screen ──────────────────────────────────────────────────────────────────
 class AdminHomeScreen extends StatefulWidget {
   const AdminHomeScreen({super.key});
   @override
@@ -56,21 +57,20 @@ class _AdminHomeScreenState extends State<AdminHomeScreen>
 
   List<Map<String, dynamic>> _allComplaints    = [];
   List<Map<String, dynamic>> _activeComplaints = [];
+  List<Map<String, dynamic>> _workers          = [];
   Map<String, dynamic>?      _adminData;
   bool    _isLoading  = true;
   String? _error;
-  // Removed _filter, use _tabCtrl.index instead
   String  _searchQ    = '';
 
   late final TabController _tabCtrl;
   final _searchCtrl = TextEditingController();
 
   static const Map<String, int> _pLevel = {
-    'low': 1, 'medium': 2, 'high': 3, 'critical': 4,
+    'low': 1, 'medium': 2, 'high': 3,
   };
-  static const List<String> _pLabels = ['low', 'medium', 'high', 'critical'];
+  static const List<String> _pLabels = ['low', 'medium', 'high'];
 
-  // ── lifecycle ────────────────────────────────────────────────────────────
 
   @override
   void initState() {
@@ -79,7 +79,7 @@ class _AdminHomeScreenState extends State<AdminHomeScreen>
       statusBarColor: _kBlue,
       statusBarIconBrightness: Brightness.light,
     ));
-    _tabCtrl = TabController(length: 4, vsync: this);
+    _tabCtrl = TabController(length: 5, vsync: this);
     _loadData();
   }
 
@@ -90,7 +90,6 @@ class _AdminHomeScreenState extends State<AdminHomeScreen>
     super.dispose();
   }
 
-  // ── data ─────────────────────────────────────────────────────────────────
 
   Future<void> _loadData() async {
     setState(() { _isLoading = true; _error = null; });
@@ -145,17 +144,86 @@ class _AdminHomeScreenState extends State<AdminHomeScreen>
           (_pLevel[b['priority']] ?? 0).compareTo(_pLevel[a['priority']] ?? 0));
 
       final escalatedIds = {for (final c in active) c['id']: c['priority']};
-      final allUpdated = all.map((c) {
-        if (escalatedIds.containsKey(c['id'])) {
-          return Map<String, dynamic>.from(c)
-            ..['priority'] = escalatedIds[c['id']];
+      final complaintIds =
+          all.map((c) => c['id']).whereType<Object>().toList();
+      Map<dynamic, List<Map<String, dynamic>>> commentsMap = {};
+      if (complaintIds.isNotEmpty) {
+        try {
+          final rawComments = await _db
+              .from('additional_comments')
+              .select()
+              .inFilter('complaint_id', complaintIds)
+              .order('created_at', ascending: false);
+          for (final row in rawComments as List) {
+            final cid = row['complaint_id'];
+            commentsMap.putIfAbsent(cid, () => []).add(
+                Map<String, dynamic>.from(row as Map));
+          }
+        } catch (e) {
+          debugPrint('additional_comments fetch error: $e');
         }
-        return c;
+      }
+
+      final allUpdated = all.map((c) {
+        final updated = escalatedIds.containsKey(c['id'])
+            ? (Map<String, dynamic>.from(c)..['priority'] = escalatedIds[c['id']])
+            : Map<String, dynamic>.from(c);
+        updated['_comments'] = commentsMap[c['id']] ?? [];
+        return updated;
+      }).toList();
+
+      for (final c in deduped) {
+        c['_comments'] = commentsMap[c['id']] ?? [];
+      }
+
+      final dynamic rawWorkers = await _db
+          .from('workers')
+          .select()
+          .eq('ward_no', wardId)
+          .order('name');
+      final workersList = List<Map<String, dynamic>>.from(rawWorkers as List);
+
+      final workerStats = <dynamic, Map<String, dynamic>>{};
+      for (final c in allUpdated) {
+        final wid = c['assigned_worker_id'];
+        if (wid == null) continue;
+        workerStats.putIfAbsent(wid, () => {
+          'total': 0, 'resolved': 0, 'ratingSum': 0.0, 'ratingCount': 0,
+        });
+        workerStats[wid]!['total'] = (workerStats[wid]!['total'] as int) + 1;
+        if (c['status'] == 'closed') {
+          workerStats[wid]!['resolved'] =
+              (workerStats[wid]!['resolved'] as int) + 1;
+          final r = c['rating'];
+          if (r != null) {
+            workerStats[wid]!['ratingSum'] =
+                (workerStats[wid]!['ratingSum'] as double) + (r as num).toDouble();
+            workerStats[wid]!['ratingCount'] =
+                (workerStats[wid]!['ratingCount'] as int) + 1;
+          }
+        }
+      }
+
+      final enrichedWorkers = workersList.map((w) {
+        final stats = workerStats[w['id']] ??<String, dynamic>{
+          'total': 0, 'resolved': 0, 'ratingSum': 0.0, 'ratingCount': 0,
+        };
+        final ratingCount = stats['ratingCount'] as int;
+        return {
+          ...w,
+          '_total':    stats['total'] as int,
+          '_resolved': stats['resolved'] as int,
+          '_avgRating': ratingCount > 0
+              ? (stats['ratingSum'] as double) / ratingCount
+              : null,
+          '_ratingCount': ratingCount,
+        };
       }).toList();
 
       setState(() {
         _allComplaints    = allUpdated;
         _activeComplaints = deduped;
+        _workers          = enrichedWorkers;
         _isLoading        = false;
       });
     } catch (e) {
@@ -190,7 +258,7 @@ class _AdminHomeScreenState extends State<AdminHomeScreen>
     for (final group in groups.values) {
       if (group.length < _kEscalationThreshold) continue;
       final maxLv    = group.map((c) => _pLevel[c['priority']] ?? 1).reduce(max);
-      final newLv    = min(maxLv + 1, 4);
+      final newLv    = min(maxLv + 1, 3);
       final newLabel = _pLabels[newLv - 1];
       for (final c in group) {
         if ((_pLevel[c['priority']] ?? 1) < newLv) {
@@ -204,19 +272,22 @@ class _AdminHomeScreenState extends State<AdminHomeScreen>
     }
   }
 
-  // ── computed ─────────────────────────────────────────────────────────────
 
   int get _totalCount   => _allComplaints.length;
   int get _openCount    => _allComplaints.where((c) => c['status'] == 'open').length;
   int get _progressCount => _allComplaints.where((c) => c['status'] == 'progress').length;
   int get _closedCount  => _allComplaints.where((c) => c['status'] == 'closed').length;
 
-  // Removed _filtered getter, use _tabCtrl.index in _buildMainContent TabBarView
-
-  // ── assign ───────────────────────────────────────────────────────────────
 
   Future<void> _assignComplaint(Map<String, dynamic> complaint) async {
     final wardId = _adminData?['ward_id'];
+    final commentCtrl = TextEditingController();
+
+    // Mutable state shared with dialog via closure
+    Map<String, dynamic>? selectedWorker;
+    String selectedPriority = (complaint['priority'] as String? ?? 'medium');
+    bool aiLoading = false;
+    String? aiSuggestedPriority;
 
     List<Map<String, dynamic>> workers = [];
     String? fetchErr;
@@ -234,48 +305,156 @@ class _AdminHomeScreenState extends State<AdminHomeScreen>
 
     if (!mounted) return;
 
-    Map<String, dynamic>? selected;
-    final pick = await showDialog<Map<String, dynamic>>(
+    final confirmed = await showDialog<bool>(
       context: context,
+      barrierDismissible: false,
       builder: (_) => StatefulBuilder(
-        builder: (ctx, ss) => Dialog(
-          backgroundColor: Colors.white,
-          shape:
-              RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-          elevation: 8,
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 440),
-            child: Padding(
-              padding: const EdgeInsets.all(24),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text('Assign Complaint',
-                      style: GoogleFonts.poppins(
-                          color: _kTextDark,
-                          fontWeight: FontWeight.w700,
-                          fontSize: 16)),
-                  const SizedBox(height: 14),
-                  _chip(complaint['issue_name'] as String? ?? 'Issue',
-                      _issueIcon(complaint['issue_name'] as String?)),
-                  const SizedBox(height: 16),
-                  if (fetchErr != null)
-                    _alertBox('Workers fetch error: $fetchErr', _kRed)
-                  else if (workers.isEmpty)
-                    _alertBox('No available workers in this ward.', _kOrange,
-                        icon: Icons.warning_amber_rounded)
-                  else
-                    Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text('Available Workers',
-                            style: GoogleFonts.poppins(
-                                color: _kTextMid,
-                                fontSize: 11,
-                                fontWeight: FontWeight.w600)),
-                        const SizedBox(height: 8),
-                        Container(
+        builder: (ctx, ss) {
+          Future<void> getAISuggestion() async {
+            ss(() => aiLoading = true);
+            try {
+              final resp = await http.post(
+                Uri.parse(
+                    'https://wriwcwwnywfqyqvjdvod.supabase.co/functions/v1/analyze-issue'),
+                headers: {'Content-Type': 'application/json'},
+                body: jsonEncode({
+                  'latitude': complaint['latitude'],
+                  'longitude': complaint['longitude'],
+                  'issue_name': complaint['issue_name'],
+                  'adminContext': commentCtrl.text.trim(),
+                }),
+              );
+              if (resp.statusCode == 200) {
+                final data = jsonDecode(resp.body) as Map<String, dynamic>;
+                final raw = (data['priority'] as String? ?? '').toLowerCase();
+                if (['low', 'medium', 'high'].contains(raw)) {
+                  ss(() {
+                    aiSuggestedPriority = raw;
+                    selectedPriority = raw;
+                    aiLoading = false;
+                  });
+                  return;
+                }
+              }
+            } catch (_) {}
+            ss(() => aiLoading = false);
+          }
+
+          return Dialog(
+            backgroundColor: Colors.white,
+            shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(20)),
+            elevation: 8,
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 500),
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.all(24),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('Assign Complaint',
+                        style: GoogleFonts.poppins(
+                            color: _kTextDark,
+                            fontWeight: FontWeight.w700,
+                            fontSize: 16)),
+                    const SizedBox(height: 14),
+                    _chip(complaint['issue_name'] as String? ?? 'Issue',
+                        _issueIcon(complaint['issue_name'] as String?)),
+                    const SizedBox(height: 16),
+
+                    if (fetchErr != null)
+                      _alertBox('Workers fetch error: $fetchErr', _kRed)
+                    else if (workers.isEmpty)
+                      _alertBox('No available workers in this ward.',
+                          _kOrange,
+                          icon: Icons.warning_amber_rounded)
+                    else
+                      Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text('Available Workers',
+                              style: GoogleFonts.poppins(
+                                  color: _kTextMid,
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w600)),
+                          const SizedBox(height: 8),
+                          Container(
+                            decoration: BoxDecoration(
+                              color: _kBg,
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(color: _kDivider),
+                            ),
+                            padding:
+                                const EdgeInsets.symmetric(horizontal: 14),
+                            child: DropdownButtonHideUnderline(
+                              child: DropdownButton<Map<String, dynamic>>(
+                                isExpanded: true,
+                                hint: Text('Choose a worker…',
+                                    style: GoogleFonts.poppins(
+                                        color: _kTextMid, fontSize: 13)),
+                                value: selectedWorker,
+                                dropdownColor: Colors.white,
+                                borderRadius: BorderRadius.circular(12),
+                                items: workers.map((w) {
+                                  return DropdownMenuItem<
+                                      Map<String, dynamic>>(
+                                    value: w,
+                                    child: Row(children: [
+                                      Container(
+                                        padding: const EdgeInsets.all(7),
+                                        decoration: BoxDecoration(
+                                          color: _kBlue.withOpacity(0.1),
+                                          shape: BoxShape.circle,
+                                        ),
+                                        child: const Icon(
+                                            Icons.engineering_rounded,
+                                            color: _kBlue,
+                                            size: 14),
+                                      ),
+                                      const SizedBox(width: 10),
+                                      Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          Text(w['name'] as String,
+                                              style: GoogleFonts.poppins(
+                                                  color: _kTextDark,
+                                                  fontSize: 13,
+                                                  fontWeight:
+                                                      FontWeight.w600)),
+                                          if (w['phone'] != null)
+                                            Text(w['phone'] as String,
+                                                style: GoogleFonts.poppins(
+                                                    color: _kTextMid,
+                                                    fontSize: 11)),
+                                        ],
+                                      ),
+                                    ]),
+                                  );
+                                }).toList(),
+                                onChanged: (v) =>
+                                    ss(() => selectedWorker = v),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+
+                    const SizedBox(height: 16),
+                    const Divider(height: 1),
+                    const SizedBox(height: 16),
+
+                    Text('Priority',
+                        style: GoogleFonts.poppins(
+                            color: _kTextMid,
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600)),
+                    const SizedBox(height: 8),
+                    Row(children: [
+                      Expanded(
+                        child: Container(
                           decoration: BoxDecoration(
                             color: _kBg,
                             borderRadius: BorderRadius.circular(12),
@@ -284,107 +463,184 @@ class _AdminHomeScreenState extends State<AdminHomeScreen>
                           padding:
                               const EdgeInsets.symmetric(horizontal: 14),
                           child: DropdownButtonHideUnderline(
-                            child: DropdownButton<Map<String, dynamic>>(
+                            child: DropdownButton<String>(
                               isExpanded: true,
-                              hint: Text('Choose a worker…',
-                                  style: GoogleFonts.poppins(
-                                      color: _kTextMid, fontSize: 13)),
-                              value: selected,
+                              value: selectedPriority,
                               dropdownColor: Colors.white,
                               borderRadius: BorderRadius.circular(12),
-                              items: workers.map((w) {
-                                return DropdownMenuItem<
-                                    Map<String, dynamic>>(
-                                  value: w,
+                              items: _pLabels.map((p) {
+                                return DropdownMenuItem<String>(
+                                  value: p,
                                   child: Row(children: [
                                     Container(
-                                      padding: const EdgeInsets.all(7),
+                                      width: 10,
+                                      height: 10,
                                       decoration: BoxDecoration(
-                                        color: _kBlue.withOpacity(0.1),
-                                        shape: BoxShape.circle,
-                                      ),
-                                      child: const Icon(
-                                          Icons.engineering_rounded,
-                                          color: _kBlue,
-                                          size: 14),
+                                          color: _pColor(p),
+                                          shape: BoxShape.circle),
                                     ),
                                     const SizedBox(width: 10),
-                                    Column(
-                                      crossAxisAlignment:
-                                          CrossAxisAlignment.start,
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        Text(w['name'] as String,
-                                            style: GoogleFonts.poppins(
-                                                color: _kTextDark,
-                                                fontSize: 13,
-                                                fontWeight: FontWeight.w600)),
-                                        if (w['phone'] != null)
-                                          Text(w['phone'] as String,
-                                              style: GoogleFonts.poppins(
-                                                  color: _kTextMid,
-                                                  fontSize: 11)),
-                                      ],
-                                    ),
+                                    Text(p.toUpperCase(),
+                                        style: GoogleFonts.poppins(
+                                            color: _kTextDark,
+                                            fontSize: 13,
+                                            fontWeight: FontWeight.w500)),
                                   ]),
                                 );
                               }).toList(),
-                              onChanged: (v) => ss(() => selected = v),
+                              onChanged: (v) =>
+                                  ss(() => selectedPriority = v!),
                             ),
                           ),
                         ),
+                      ),
+                      const SizedBox(width: 10),
+                      aiLoading
+                          ? const SizedBox(
+                              width: 40,
+                              height: 40,
+                              child: Padding(
+                                padding: EdgeInsets.all(8),
+                                child: CircularProgressIndicator(
+                                    strokeWidth: 2.5, color: _kBlue),
+                              ))
+                          : Tooltip(
+                              message: 'AI Priority Suggestion',
+                              child: InkWell(
+                                onTap: getAISuggestion,
+                                borderRadius: BorderRadius.circular(10),
+                                child: Container(
+                                  padding: const EdgeInsets.all(10),
+                                  decoration: BoxDecoration(
+                                    color: _kBlue.withOpacity(0.08),
+                                    borderRadius: BorderRadius.circular(10),
+                                    border: Border.all(
+                                        color: _kBlue.withOpacity(0.25)),
+                                  ),
+                                  child: const Icon(
+                                      Icons.auto_awesome_rounded,
+                                      color: _kBlue,
+                                      size: 20),
+                                ),
+                              ),
+                            ),
+                    ]),
+                    if (aiSuggestedPriority != null) ...[
+                      const SizedBox(height: 8),
+                      Row(children: [
+                        const Icon(Icons.auto_awesome_rounded,
+                            size: 13, color: _kBlue),
+                        const SizedBox(width: 6),
+                        Expanded(
+                          child: Text(
+                            'AI suggests: ${aiSuggestedPriority!.toUpperCase()} — applied based on location context.',
+                            style: GoogleFonts.poppins(
+                                color: _kBlue, fontSize: 11),
+                          ),
+                        ),
+                      ]),
+                    ],
+
+                    const SizedBox(height: 16),
+                    const Divider(height: 1),
+                    const SizedBox(height: 16),
+
+                    Text('Additional Comment (optional)',
+                        style: GoogleFonts.poppins(
+                            color: _kTextMid,
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600)),
+                    const SizedBox(height: 8),
+                    TextField(
+                      controller: commentCtrl,
+                      maxLines: 3,
+                      style: GoogleFonts.poppins(
+                          color: _kTextDark, fontSize: 13),
+                      decoration: InputDecoration(
+                        hintText:
+                            'e.g. near hospital, requires urgent attention…',
+                        hintStyle: GoogleFonts.poppins(
+                            color: _kTextMid, fontSize: 12),
+                        filled: true,
+                        fillColor: _kBg,
+                        contentPadding: const EdgeInsets.all(12),
+                        border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(12),
+                            borderSide: BorderSide(color: _kDivider)),
+                        enabledBorder: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(12),
+                            borderSide: BorderSide(color: _kDivider)),
+                        focusedBorder: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(12),
+                            borderSide: const BorderSide(
+                                color: _kBlue, width: 1.5)),
+                      ),
+                    ),
+
+                    const SizedBox(height: 20),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.end,
+                      children: [
+                        _cancelBtn(() => Navigator.pop(ctx, false)),
+                        if (workers.isNotEmpty)
+                          _primaryBtn(
+                            'Assign',
+                            selectedWorker == null
+                                ? null
+                                : () => Navigator.pop(ctx, true),
+                          ),
                       ],
                     ),
-                  const SizedBox(height: 20),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.end,
-                    children: [
-                      _cancelBtn(() => Navigator.pop(ctx)),
-                      if (workers.isNotEmpty)
-                        _primaryBtn(
-                          'Assign',
-                          selected == null ? null : () => Navigator.pop(ctx, selected),
-                        ),
-                    ],
-                  ),
-                ],
+                  ],
+                ),
               ),
             ),
-          ),
-        ),
+          );
+        },
       ),
     );
 
-    if (pick != null) {
+    if (confirmed == true && selectedWorker != null) {
       try {
         // Capacity check
         final active = (await _db
             .from('complaints')
             .select('id')
-            .eq('assigned_worker_id', pick['id'] as Object)
+            .eq('assigned_worker_id', selectedWorker!['id'] as Object)
             .eq('status', 'progress')) as List;
         if (active.length >= _kMaxWorkerJobs) {
           if (mounted) {
             _snack(
-                '${pick['name']} already has ${active.length} active jobs (max $_kMaxWorkerJobs).',
+                '${selectedWorker!['name']} already has ${active.length} active jobs (max $_kMaxWorkerJobs).',
                 _kOrange);
           }
+          commentCtrl.dispose();
           return;
         }
         final dueDate = DateTime.now().add(const Duration(days: 5));
         final dueDateStr =
             '${dueDate.year}-${dueDate.month.toString().padLeft(2, '0')}-${dueDate.day.toString().padLeft(2, '0')}';
         await _db.from('complaints').update({
-          'assigned_to':        pick['name'] as String,
-          'assigned_worker_id': pick['id'],
+          'assigned_to':        selectedWorker!['name'] as String,
+          'assigned_worker_id': selectedWorker!['id'],
           'status':             'progress',
           'deadline':           dueDateStr,
+          'priority':           selectedPriority,
         }).eq('id', complaint['id'] as Object);
+
+        final comment = commentCtrl.text.trim();
+        await _db.from('additional_comments').insert({
+          'complaint_id':          complaint['id'],
+          'admin_comment':         comment,
+          'priority_changed_to':   selectedPriority,
+          'ai_suggested_priority': aiSuggestedPriority,
+        });
         _loadData();
       } catch (e) {
         if (mounted) _snack('Assign failed: $e', _kRed);
       }
     }
+    commentCtrl.dispose();
   }
 
   Future<void> _closeComplaint(Map<String, dynamic> c) async {
@@ -412,6 +668,89 @@ class _AdminHomeScreenState extends State<AdminHomeScreen>
     }
   }
 
+  Future<void> _changePriority(Map<String, dynamic> complaint) async {
+    final current = complaint['priority'] as String? ?? 'medium';
+    final result = await showDialog<String>(
+      context: context,
+      builder: (ctx) => Dialog(
+        backgroundColor: Colors.white,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        elevation: 8,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 300),
+          child: Padding(
+            padding: const EdgeInsets.all(20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Change Priority',
+                    style: GoogleFonts.poppins(
+                        color: _kTextDark,
+                        fontWeight: FontWeight.w700,
+                        fontSize: 15)),
+                const SizedBox(height: 14),
+                ..._pLabels.map((p) {
+                  final color = _pColor(p);
+                  return InkWell(
+                    onTap: () => Navigator.pop(ctx, p),
+                    borderRadius: BorderRadius.circular(10),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 14, vertical: 11),
+                      margin: const EdgeInsets.only(bottom: 6),
+                      decoration: BoxDecoration(
+                        color: p == current
+                            ? color.withOpacity(0.1)
+                            : Colors.transparent,
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(
+                            color: p == current
+                                ? color.withOpacity(0.4)
+                                : _kDivider),
+                      ),
+                      child: Row(children: [
+                        Container(
+                          width: 10,
+                          height: 10,
+                          decoration:
+                              BoxDecoration(color: color, shape: BoxShape.circle),
+                        ),
+                        const SizedBox(width: 10),
+                        Text(p.toUpperCase(),
+                            style: GoogleFonts.poppins(
+                                color: _kTextDark,
+                                fontSize: 13,
+                                fontWeight: p == current
+                                    ? FontWeight.w700
+                                    : FontWeight.w400)),
+                        if (p == current) ...[
+                          const Spacer(),
+                          Icon(Icons.check_rounded, size: 16, color: color),
+                        ],
+                      ]),
+                    ),
+                  );
+                }),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+    if (result != null && result != current) {
+      try {
+        await _db
+            .from('complaints')
+            .update({'priority': result})
+            .eq('id', complaint['id'] as Object);
+        _loadData();
+      } catch (e) {
+        if (mounted) _snack('Priority update failed: $e', _kRed);
+      }
+    }
+  }
+
   Future<void> _logout() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.clear();
@@ -427,7 +766,6 @@ class _AdminHomeScreenState extends State<AdminHomeScreen>
     );
   }
 
-  // ── dialog helpers ───────────────────────────────────────────────────────
 
   Future<T?> _dlg<T>({
     required String title,
@@ -537,14 +875,12 @@ class _AdminHomeScreenState extends State<AdminHomeScreen>
     ));
   }
 
-  // ── colour/label helpers ─────────────────────────────────────────────────
 
   Color _pColor(String? p) {
     switch (p) {
-      case 'critical': return _kRed;
-      case 'high':     return const Color(0xffff5722);
-      case 'medium':   return _kOrange;
-      default:         return _kGreen;
+      case 'high':   return _kRed;
+      case 'medium': return _kOrange;
+      default:       return _kGreen;
     }
   }
 
@@ -565,7 +901,6 @@ class _AdminHomeScreenState extends State<AdminHomeScreen>
     }
   }
 
-  // ─── BUILD ───────────────────────────────────────────────────────────────
 
   @override
   Widget build(BuildContext context) {
@@ -589,7 +924,6 @@ class _AdminHomeScreenState extends State<AdminHomeScreen>
     );
   }
 
-  // ─── DRAWER ──────────────────────────────────────────────────────────────
 
   Widget _buildDrawer(String adminName, dynamic wardId) {
     return Drawer(
@@ -678,18 +1012,20 @@ class _AdminHomeScreenState extends State<AdminHomeScreen>
   }
 
   Widget _drawerTile(IconData icon, String label, VoidCallback fn,
-      {Color? color}) {
+      {Color? color, bool closeDrawer = true}) {
     return ListTile(
       leading: Icon(icon, color: color ?? _kTextMid, size: 22),
       title: Text(label,
           style: GoogleFonts.poppins(
               color: color ?? _kTextDark, fontSize: 14)),
       dense: true,
-      onTap: () { Navigator.pop(context); fn(); },
+      onTap: () {
+        if (closeDrawer && Navigator.canPop(context)) Navigator.pop(context);
+        fn();
+      },
     );
   }
 
-  // ─── WIDE LAYOUT ─────────────────────────────────────────────────────────
 
   Widget _buildWide(dynamic wardId, String adminName) {
     return Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -767,10 +1103,10 @@ class _AdminHomeScreenState extends State<AdminHomeScreen>
         ),
         const SizedBox(height: 8),
         const Divider(color: _kDivider, indent: 16, endIndent: 16),
-        _drawerTile(Icons.refresh_rounded, 'Refresh Data', _loadData),
+        _drawerTile(Icons.refresh_rounded, 'Refresh Data', _loadData, closeDrawer: false),
         const Spacer(),
         const Divider(color: _kDivider, indent: 16, endIndent: 16),
-        _drawerTile(Icons.logout_rounded, 'Logout', _logout, color: _kRed),
+        _drawerTile(Icons.logout_rounded, 'Logout', _logout, color: _kRed, closeDrawer: false),
         const SizedBox(height: 16),
       ]),
     );
@@ -800,7 +1136,6 @@ class _AdminHomeScreenState extends State<AdminHomeScreen>
     );
   }
 
-  // ─── NARROW LAYOUT ───────────────────────────────────────────────────────
 
   Widget _buildNarrow(dynamic wardId, String adminName) {
     return Column(
@@ -816,6 +1151,7 @@ class _AdminHomeScreenState extends State<AdminHomeScreen>
         ]),
         const SizedBox(height: 56),
         _buildSearch(),
+        _buildOverdueBanner(),
         _buildTabs(),
         Expanded(
           child: RefreshIndicator(
@@ -826,8 +1162,8 @@ class _AdminHomeScreenState extends State<AdminHomeScreen>
               physics: const BouncingScrollPhysics(),
               children: [
                 _buildComplaintsList(_activeComplaints),
-                _buildComplaintsList(_activeComplaints.where((c) => c['status'] == 'open').toList()),
-                _buildComplaintsList(_activeComplaints.where((c) => c['status'] == 'progress').toList()),
+                _buildComplaintsList(_allComplaints.where((c) => c['status'] == 'open').toList()),
+                _buildComplaintsList(_allComplaints.where((c) => c['status'] == 'progress').toList()),
                 _buildComplaintsList(_allComplaints.where((c) => c['status'] == 'closed').toList()),
               ],
             ),
@@ -861,6 +1197,7 @@ class _AdminHomeScreenState extends State<AdminHomeScreen>
             ]),
           ),
           _buildSearch(),
+          _buildOverdueBanner(),
           _buildTabs(),
           Expanded(
             child: TabBarView(
@@ -870,11 +1207,13 @@ class _AdminHomeScreenState extends State<AdminHomeScreen>
                 // All Active
                 _buildComplaintsList(_activeComplaints),
                 // Pending
-                _buildComplaintsList(_activeComplaints.where((c) => c['status'] == 'open').toList()),
+                _buildComplaintsList(_allComplaints.where((c) => c['status'] == 'open').toList()),
                 // In Progress
-                _buildComplaintsList(_activeComplaints.where((c) => c['status'] == 'progress').toList()),
+                _buildComplaintsList(_allComplaints.where((c) => c['status'] == 'progress').toList()),
                 // Resolved
                 _buildComplaintsList(_allComplaints.where((c) => c['status'] == 'closed').toList()),
+                // Workers
+                _buildWorkersList(),
               ],
             ),
           ),
@@ -882,6 +1221,200 @@ class _AdminHomeScreenState extends State<AdminHomeScreen>
       ),
     );
   }
+
+
+  Widget _buildWorkersList() {
+    if (_workers.isEmpty) {
+      return Center(
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          Icon(Icons.engineering_rounded, size: 52, color: _kTextMid.withOpacity(0.25)),
+          const SizedBox(height: 12),
+          Text('No workers assigned to this ward',
+              style: GoogleFonts.poppins(color: _kTextMid, fontSize: 13)),
+        ]),
+      );
+    }
+    return ListView.builder(
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
+      itemCount: _workers.length,
+      itemBuilder: (_, i) => _buildWorkerCard(_workers[i]),
+    );
+  }
+
+  Widget _buildWorkerCard(Map<String, dynamic> w) {
+    final name        = w['name']         as String? ?? 'Unknown';
+    final phone       = w['phone']        as String? ?? '—';
+    final isAvailable = w['is_available'] as bool?   ?? false;
+    final total       = w['_total']       as int;
+    final resolved    = w['_resolved']    as int;
+    final avgRating   = w['_avgRating']   as double?;
+    final ratingCount = w['_ratingCount'] as int;
+
+    final successRate = total > 0 ? (resolved / total * 100) : 0.0;
+    final statusColor = isAvailable ? _kGreen : _kOrange;
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 14),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(18),
+        boxShadow: [
+          BoxShadow(
+              blurRadius: 12,
+              color: Colors.black.withOpacity(0.07),
+              offset: const Offset(0, 4)),
+        ],
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Container(
+          height: 4,
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+                colors: [statusColor, statusColor.withOpacity(0.3)]),
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            // Name + availability badge
+            Row(children: [
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: _kBlue.withOpacity(0.08),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: const Icon(Icons.engineering_rounded,
+                    color: _kBlue, size: 22),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                  Text(name,
+                      style: GoogleFonts.poppins(
+                          color: _kTextDark,
+                          fontSize: 15,
+                          fontWeight: FontWeight.w700)),
+                  Row(children: [
+                    Icon(Icons.phone_rounded,
+                        size: 12, color: _kTextMid),
+                    const SizedBox(width: 4),
+                    Text(phone,
+                        style: GoogleFonts.poppins(
+                            color: _kTextMid, fontSize: 12)),
+                  ]),
+                ]),
+              ),
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                decoration: BoxDecoration(
+                  color: statusColor.withOpacity(0.1),
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(color: statusColor.withOpacity(0.4)),
+                ),
+                child: Text(
+                  isAvailable ? 'AVAILABLE' : 'BUSY',
+                  style: GoogleFonts.poppins(
+                      fontSize: 10,
+                      fontWeight: FontWeight.w700,
+                      color: statusColor),
+                ),
+              ),
+            ]),
+
+            const SizedBox(height: 16),
+            const Divider(color: _kDivider, height: 1),
+            const SizedBox(height: 14),
+
+            Row(children: [
+              _workerStat(Icons.task_alt_rounded, 'Total', '$total', _kBlue),
+              _workerStatDivider(),
+              _workerStat(Icons.check_circle_rounded, 'Resolved',
+                  '$resolved', _kGreen),
+              _workerStatDivider(),
+              _workerStat(
+                Icons.bar_chart_rounded,
+                'Success',
+                total > 0 ? '${successRate.toStringAsFixed(0)}%' : '—',
+                successRate >= 80
+                    ? _kGreen
+                    : successRate >= 50
+                        ? _kOrange
+                        : _kRed,
+              ),
+              _workerStatDivider(),
+              _workerStat(
+                Icons.star_rounded,
+                'Avg Rating',
+                avgRating != null
+                    ? '${avgRating.toStringAsFixed(1)} ★ ($ratingCount)'
+                    : '—',
+                avgRating != null
+                    ? (avgRating >= 4
+                        ? _kGreen
+                        : avgRating >= 2.5
+                            ? _kOrange
+                            : _kRed)
+                    : _kTextMid,
+              ),
+            ]),
+
+            if (total > 0) ...[
+              const SizedBox(height: 14),
+              Row(children: [
+                Expanded(
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(4),
+                    child: LinearProgressIndicator(
+                      value: successRate / 100,
+                      minHeight: 6,
+                      backgroundColor: _kDivider,
+                      valueColor: AlwaysStoppedAnimation<Color>(
+                        successRate >= 80
+                            ? _kGreen
+                            : successRate >= 50
+                                ? _kOrange
+                                : _kRed,
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Text('${successRate.toStringAsFixed(0)}%',
+                    style: GoogleFonts.poppins(
+                        fontSize: 11,
+                        color: _kTextMid,
+                        fontWeight: FontWeight.w600)),
+              ]),
+            ],
+          ]),
+        ),
+      ]),
+    );
+  }
+
+  Widget _workerStat(IconData icon, String label, String value, Color color) {
+    return Expanded(
+      child: Column(children: [
+        Icon(icon, size: 16, color: color),
+        const SizedBox(height: 4),
+        Text(value,
+            style: GoogleFonts.poppins(
+                fontSize: 12,
+                fontWeight: FontWeight.w700,
+                color: color)),
+        Text(label,
+            style: GoogleFonts.poppins(fontSize: 9, color: _kTextMid)),
+      ]),
+    );
+  }
+
+  Widget _workerStatDivider() =>
+      Container(width: 1, height: 40, color: _kDivider);
 
   Widget _buildComplaintsList(List<Map<String, dynamic>> complaints) {
     final filtered = _searchQ.isNotEmpty
@@ -903,7 +1436,6 @@ class _AdminHomeScreenState extends State<AdminHomeScreen>
     );
   }
 
-  // ── HEADER (narrow) ───────────────────────────────────────────────────────
 
   Widget _buildHeader(dynamic wardId, String adminName) {
     return Container(
@@ -966,7 +1498,6 @@ class _AdminHomeScreenState extends State<AdminHomeScreen>
     );
   }
 
-  // ── STAT ROW ──────────────────────────────────────────────────────────────
 
   Widget _buildStatRow() {
     return Padding(
@@ -1025,7 +1556,6 @@ class _AdminHomeScreenState extends State<AdminHomeScreen>
     );
   }
 
-  // ── SEARCH ────────────────────────────────────────────────────────────────
 
   Widget _buildSearch() {
     return Padding(
@@ -1068,10 +1598,9 @@ class _AdminHomeScreenState extends State<AdminHomeScreen>
     );
   }
 
-  // ── TABS ──────────────────────────────────────────────────────────────────
 
   Widget _buildTabs() {
-    const labels = ['All Active', 'Pending', 'In Progress', 'Resolved'];
+    const labels = ['All Active', 'Pending', 'In Progress', 'Resolved', 'Workers'];
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -1141,7 +1670,37 @@ class _AdminHomeScreenState extends State<AdminHomeScreen>
     );
   }
 
-  // ── CARD ──────────────────────────────────────────────────────────────────
+
+  Widget _buildOverdueBanner() {
+    final overdueCount = _activeComplaints.where((c) {
+      final dl = c['deadline'] != null
+          ? DateTime.tryParse(c['deadline'].toString())?.toLocal()
+          : null;
+      return dl != null && dl.isBefore(DateTime.now()) && c['status'] != 'closed';
+    }).length;
+    if (overdueCount == 0) return const SizedBox.shrink();
+    return Container(
+      margin: const EdgeInsets.fromLTRB(16, 6, 16, 0),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: _kRed.withOpacity(0.08),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: _kRed.withOpacity(0.3)),
+      ),
+      child: Row(children: [
+        const Icon(Icons.warning_amber_rounded, color: _kRed, size: 18),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Text(
+            '⚠ $overdueCount complaint${overdueCount == 1 ? '' : 's'} past deadline — action required!',
+            style: GoogleFonts.poppins(
+                color: _kRed, fontSize: 12, fontWeight: FontWeight.w500),
+          ),
+        ),
+      ]),
+    );
+  }
+
 
   Widget _buildCard(Map<String, dynamic> c) {
     final priority    = c['priority']    as String? ?? 'low';
@@ -1162,6 +1721,12 @@ class _AdminHomeScreenState extends State<AdminHomeScreen>
         deadline.isBefore(DateTime.now()) &&
         status != 'closed';
     final hasImage = (c['image_url'] as String? ?? '').isNotEmpty;
+    final daysUnassigned = (status == 'open' &&
+            c['assigned_worker_id'] == null &&
+            createdAt != null)
+        ? DateTime.now().difference(createdAt).inDays
+        : 0;
+    final isLongUnassigned = daysUnassigned >= _kUnassignedDays;
 
     return Container(
       margin: const EdgeInsets.only(bottom: 14),
@@ -1190,7 +1755,6 @@ class _AdminHomeScreenState extends State<AdminHomeScreen>
           child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // Complaint ID
                 if (complaintId != null) ...[
                   Text(complaintId,
                       style: GoogleFonts.poppins(
@@ -1200,7 +1764,6 @@ class _AdminHomeScreenState extends State<AdminHomeScreen>
                           letterSpacing: 0.5)),
                   const SizedBox(height: 4),
                 ],
-                // Title row
                 Row(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
@@ -1225,9 +1788,40 @@ class _AdminHomeScreenState extends State<AdminHomeScreen>
                                     fontSize: 14)),
                             const SizedBox(height: 6),
                             Wrap(spacing: 5, runSpacing: 4, children: [
-                              _badge(priority.toUpperCase(), pc),
+                              GestureDetector(
+                                onTap: status != 'closed'
+                                    ? () => _changePriority(c)
+                                    : null,
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 7, vertical: 2),
+                                  decoration: BoxDecoration(
+                                    color: pc.withOpacity(0.1),
+                                    borderRadius: BorderRadius.circular(20),
+                                    border:
+                                        Border.all(color: pc.withOpacity(0.3)),
+                                  ),
+                                  child: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Text(priority.toUpperCase(),
+                                            style: GoogleFonts.poppins(
+                                                fontSize: 9,
+                                                fontWeight: FontWeight.w700,
+                                                color: pc,
+                                                letterSpacing: 0.3)),
+                                        if (status != 'closed') ...[
+                                          const SizedBox(width: 3),
+                                          Icon(Icons.edit_rounded,
+                                              size: 9, color: pc),
+                                        ],
+                                      ]),
+                                ),
+                              ),
                               _badge(_sLabel(status), sc),
                               if (isOverdue) _badge('OVERDUE', _kRed),
+                              if (isLongUnassigned)
+                                _badge('WAITING ${daysUnassigned}D', _kOrange),
                             ]),
                           ],
                         ),
@@ -1247,7 +1841,7 @@ class _AdminHomeScreenState extends State<AdminHomeScreen>
                         ),
                       ],
                     ]),
-                // Description
+              
                 if ((c['description'] as String? ?? '').isNotEmpty) ...[
                   const SizedBox(height: 8),
                   Text(
@@ -1255,6 +1849,19 @@ class _AdminHomeScreenState extends State<AdminHomeScreen>
                     style: GoogleFonts.poppins(
                         color: _kTextMid, fontSize: 12, height: 1.5),
                     maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ],
+                if ((c['additional_comments'] as String? ?? '').isNotEmpty) ...[
+                  const SizedBox(height: 6),
+                  Text(
+                    c['additional_comments'] as String,
+                    style: GoogleFonts.poppins(
+                        color: _kTextDark,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                        height: 1.5),
+                    maxLines: 3,
                     overflow: TextOverflow.ellipsis,
                   ),
                 ],
@@ -1280,7 +1887,68 @@ class _AdminHomeScreenState extends State<AdminHomeScreen>
                       '${createdAt.minute.toString().padLeft(2, '0')}',
                     ),
                 ]),
-                // Show rating and review if resolved and rating exists
+                if ((c['_comments'] as List? ?? []).isNotEmpty) ...[
+                  const SizedBox(height: 10),
+                  Container(
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: _kBlue.withOpacity(0.04),
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: _kBlue.withOpacity(0.15)),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(children: [
+                          const Icon(Icons.admin_panel_settings_rounded,
+                              size: 13, color: _kBlue),
+                          const SizedBox(width: 6),
+                          Text('Admin Comments',
+                              style: GoogleFonts.poppins(
+                                  color: _kBlue,
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w600)),
+                        ]),
+                        const SizedBox(height: 6),
+                        ...((c['_comments'] as List).cast<Map<String, dynamic>>().map((cm) {
+                          final commentText = cm['admin_comment'] as String? ?? '';
+                          final priorityChanged = cm['priority_changed_to'] as String?;
+                          final aiSuggested = cm['ai_suggested_priority'] as String?;
+                          final createdAt = cm['created_at'] != null
+                              ? DateTime.tryParse(cm['created_at'].toString())?.toLocal()
+                              : null;
+                          return Padding(
+                            padding: const EdgeInsets.only(top: 4),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                if (commentText.isNotEmpty)
+                                  Text('• $commentText',
+                                      style: GoogleFonts.poppins(
+                                          color: _kTextDark,
+                                          fontSize: 12,
+                                          height: 1.4)),
+                                Wrap(spacing: 10, children: [
+                                  if (priorityChanged != null)
+                                    _meta(Icons.flag_rounded,
+                                        'Priority → ${priorityChanged.toUpperCase()}',
+                                        color: _pColor(priorityChanged)),
+                                  if (aiSuggested != null)
+                                    _meta(Icons.auto_awesome_rounded,
+                                        'AI: ${aiSuggested.toUpperCase()}',
+                                        color: _kBlue),
+                                  if (createdAt != null)
+                                    _meta(Icons.access_time_rounded,
+                                        '${createdAt.day}/${createdAt.month}/${createdAt.year}'),
+                                ]),
+                              ],
+                            ),
+                          );
+                        })),
+                      ],
+                    ),
+                  ),
+                ],
                 if (status == 'closed' && c['rating'] != null) ...[
                   const SizedBox(height: 10),
                   Row(
@@ -1380,7 +2048,6 @@ class _AdminHomeScreenState extends State<AdminHomeScreen>
     );
   }
 
-  // ── LOADER / ERROR / EMPTY ────────────────────────────────────────────────
 
   Widget _buildLoader() {
     return Container(
@@ -1461,7 +2128,6 @@ class _AdminHomeScreenState extends State<AdminHomeScreen>
     );
   }
 
-  // ── tiny widgets ─────────────────────────────────────────────────────────
 
   Widget _badge(String label, Color color) {
     return Container(
@@ -1495,7 +2161,6 @@ class _AdminHomeScreenState extends State<AdminHomeScreen>
   }
 }
 
-// ─── tiny data holder ────────────────────────────────────────────────────────
 class _StatData {
   final String   label;
   final int      value;

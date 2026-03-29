@@ -6,7 +6,6 @@ import '../bloc/login/login_cubit.dart';
 import '../bloc/login/login_state.dart';
 import 'home_screen.dart';
 
-// ─── light theme (matches home screen) ───────────────────────────────────────
 const _kBg        = Color(0xfff0f4f8);
 const _kBlue      = Color(0xff1565c0);
 const _kBlueLight = Color(0xff42a5f5);
@@ -92,7 +91,6 @@ class _AdminLoginScreenState extends State<AdminLoginScreen>
         },
         builder: (context, state) {
           return Stack(children: [
-            // ── background ────────────────────────────────────────────
             Container(
               decoration: const BoxDecoration(
                 gradient: LinearGradient(
@@ -103,7 +101,6 @@ class _AdminLoginScreenState extends State<AdminLoginScreen>
               ),
             ),
 
-            // ── decorative blobs ──────────────────────────────────────
             Positioned(
               top: -80,
               right: -60,
@@ -115,7 +112,6 @@ class _AdminLoginScreenState extends State<AdminLoginScreen>
               child: _blob(260, _kBlue.withOpacity(0.08)),
             ),
 
-            // ── centered card ─────────────────────────────────────────
             Center(
               child: SingleChildScrollView(
                 padding: const EdgeInsets.symmetric(
@@ -171,11 +167,9 @@ class _AdminLoginScreenState extends State<AdminLoginScreen>
                         ),
                         const SizedBox(height: 28),
 
-                        // step indicator
                         _StepIndicator(currentStep: _stepOf(state)),
                         const SizedBox(height: 28),
 
-                        // ── fields ──
                         if (state is AuthInitial)
                           _field(
                             ctrl: _mobileCtrl,
@@ -309,7 +303,6 @@ class _AdminLoginScreenState extends State<AdminLoginScreen>
               ),
             ),
 
-            // ── loading overlay ───────────────────────────────────────
             if (_loading)
               Positioned.fill(
                 child: Container(
@@ -344,7 +337,6 @@ class _AdminLoginScreenState extends State<AdminLoginScreen>
     );
   }
 
-  // ── helpers ──────────────────────────────────────────────────────────────
 
   Widget _blob(double size, Color color) => Container(
         width: size,
@@ -451,7 +443,6 @@ class _AdminLoginScreenState extends State<AdminLoginScreen>
   }
 }
 
-// ─── step indicator ───────────────────────────────────────────────────────────
 
 class _StepIndicator extends StatelessWidget {
   final int currentStep;
