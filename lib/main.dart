@@ -16,7 +16,7 @@ void main() async {
   );
 
   await Supabase.initialize(
-    url: 'https://wriwcwwnywfqyqvjdvod.supabase.co',
+    url: 'xxxPASTE_YOUR_SUPABASE_URL_HERExxx',
     anonKey: 'xxxPASTE_YOUR_SUPABASE_ANON_KEY_HERExxx',
   );
 
