@@ -17,7 +17,7 @@ void main() async {
 
   await Supabase.initialize(
     url: 'https://wriwcwwnywfqyqvjdvod.supabase.co',
-    anonKey: 'sb_publishable_YzjyQc2FqNhqV3rTw2yEgg_VSjytA7S',
+    anonKey: 'xxxPASTE_YOUR_SUPABASE_ANON_KEY_HERExxx',
   );
 
   // Check if admin is already logged in
